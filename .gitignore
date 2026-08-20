@@ -62,3 +62,7 @@ htmlcov/
 .env
 .env.*
 !.env.example
+
+# Raw MOBDrone download (5.5 GB), fetched by v2/data/build_mobdrone.py
+/data/
+v2/data/mobdrone_raw/
