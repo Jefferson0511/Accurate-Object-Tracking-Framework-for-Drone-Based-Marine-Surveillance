@@ -1,0 +1,84 @@
+Accurate Object Tracking Framework for Drone-Based Marine Surveillance
+=====================================================================
+
+This repository is a derivative work. It vendors and modifies third-party
+source, and is distributed under the GNU General Public License v3.0 (see
+LICENSE) because that is the license of the largest vendored component.
+
+The sections below record what came from where.
+
+
+1. Ultralytics YOLOv8 (v8.0.3)
+------------------------------
+Path:      ultralytics/ (excluding ultralytics/yolo/v8/detect/deep_sort_pytorch/)
+Source:    https://github.com/ultralytics/ultralytics
+Version:   8.0.3
+License:   GPL-3.0
+Copyright: Ultralytics
+
+Vendored rather than installed from PyPI. The detection pipeline in this
+project hooks into BasePredictor.write_results, and that extension point was
+reshaped in later releases, so the code does not run against a modern
+`pip install ultralytics`. Pinning the tree keeps the project reproducible.
+
+
+2. YOLOv8-DeepSORT-Object-Tracking
+----------------------------------
+Path:      ultralytics/yolo/v8/detect/predict.py
+Source:    https://github.com/MuhammadMoinFaisal/YOLOv8-DeepSORT-Object-Tracking
+Author:    Muhammad Moin Faisal
+
+The DeepSORT integration layer, the rounded-label annotator (`UI_box`,
+`draw_border`) and the per-track trail buffer (`data_deque`) originate here.
+The upstream repository ships no LICENSE file.
+
+
+3. deep_sort_pytorch
+--------------------
+Path:      ultralytics/yolo/v8/detect/deep_sort_pytorch/
+Source:    https://github.com/ZQPei/deep_sort_pytorch
+License:   MIT (retained at that path)
+Copyright: (c) 2020 Ziqiang
+
+Kalman filter, Hungarian assignment and the CNN appearance descriptor.
+Unmodified.
+
+The original DeepSORT paper:
+  N. Wojke, A. Bewley, D. Paulus. "Simple Online and Realtime Tracking with a
+  Deep Association Metric." ICIP 2017. doi:10.1109/ICIP.2017.8296962
+
+
+4. MOBDrone dataset
+-------------------
+Not redistributed here. See README.md for retrieval instructions.
+License:   CC BY 4.0
+Citation:  D. Cafarelli et al. "MOBDrone: a Drone Video Dataset for Man
+           OverBoard Rescue." ICIAP 2022, LNCS vol. 13232.
+
+
+Changes made in this repository
+-------------------------------
+Relative to the upstream trees listed above:
+
+  - Removed the vehicle-counting logic from predict.py (line-crossing counters
+    `object_counter` / `object_counter1`), leaving detection, tracking, ID
+    assignment and trail rendering. The counting variant is preserved in the
+    project archive but is not part of this framework.
+
+  - Restored the canonical COCO class names in
+    ultralytics/yolo/data/datasets/*.yaml. The submitted code had class 33
+    relabelled from "kite" to "person" in five dataset configs. That edit had
+    no effect at inference time, because class names for a pretrained
+    checkpoint are read from the .pt file rather than from these YAMLs, and it
+    would have silently corrupted training on COCO. See README.md.
+
+  - Removed a duplicated `deep_sort/sort - Copy/` directory and a byte-identical
+    copy of predict.py that sat at ultralytics/predict1.py.
+
+  - Redacted a Roboflow API key that was committed inline in the dataset-download
+    cell of the fine-tuning notebook. It now reads ROBOFLOW_API_KEY from the
+    environment.
+
+  - Stripped notebook outputs. In the fine-tuning notebook these were ~28 MB and
+    were stale artifacts from the upstream author's vehicle dataset, not from
+    any run in this project.

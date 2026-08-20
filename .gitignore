@@ -1,0 +1,64 @@
+# Model weights ------------------------------------------------------------
+# Fetched at setup time, see README. yolov8l.pt is 88 MB and ckpt.t7 is 46 MB;
+# both are public checkpoints, so there is no reason to carry them in git.
+*.pt
+*.pth
+*.t7
+*.onnx
+*.engine
+
+# Datasets -----------------------------------------------------------------
+# MOBDrone is pulled from Roboflow into this path at setup time.
+MobDrone-1/
+MobDrone*/
+*.cache
+# Root-anchored: ultralytics/yolo/data/datasets/ holds config YAMLs that must
+# stay tracked, so this must not match as a bare directory name.
+/datasets/
+
+# Media --------------------------------------------------------------------
+# Input footage and rendered tracking output. Curated stills live in assets/.
+*.mp4
+*.avi
+*.mov
+*.mkv
+ultralytics/yolo/v8/detect/*.jpg
+ultralytics/yolo/v8/detect/*.png
+
+# Run artifacts ------------------------------------------------------------
+runs/
+*.log
+wandb/
+events.out.tfevents.*
+
+# Python -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.Python
+venv/
+.venv/
+env/
+
+# Notebooks ----------------------------------------------------------------
+.ipynb_checkpoints/
+
+# Tooling and editors ------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets ------------------------------------------------------------------
+# ROBOFLOW_API_KEY belongs here, never inline in a notebook.
+.env
+.env.*
+!.env.example

@@ -1,0 +1,38 @@
+# MOBDrone dataset config for YOLOv8 fine-tuning.
+#
+# The Roboflow export ships a data.yaml with absolute paths baked in, which only
+# works on the machine that downloaded it. This version uses paths relative to
+# the dataset root so it is portable.
+#
+# Point `path` at wherever you extracted the export, or pass this file directly:
+#   python train.py model=yolov8l.pt data=../../../../configs/mobdrone.yaml epochs=50 imgsz=640
+
+path: ../ultralytics/yolo/v8/detect/MobDrone-1
+train: train/images
+val: valid/images
+test: test/images
+
+# Number of classes
+nc: 5
+
+# Class names. Note this ordering is the Roboflow export's, which is
+# alphabetical and does NOT match the ordering used in the report's
+# discussion of the dataset.
+names:
+  0: boat
+  1: life_buoy
+  2: person
+  3: surfboard
+  4: wood
+
+# Split sizes in the v1 export used for this project:
+#   train 2566 images / valid 320 / test 320
+#
+# Source: https://universe.roboflow.com/mobdrone/mobdrone/dataset/1
+# License: CC BY 4.0
+roboflow:
+  workspace: mobdrone
+  project: mobdrone
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/mobdrone/mobdrone/dataset/1
