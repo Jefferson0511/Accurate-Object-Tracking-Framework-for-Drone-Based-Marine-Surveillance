@@ -1,0 +1,15 @@
+{
+  "id": "jeffersonkingston/mobdrone-stage1-inspect",
+  "title": "MOBDrone stage 1: fetch and inspect",
+  "code_file": "stage1_inspect.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

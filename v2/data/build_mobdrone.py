@@ -157,25 +157,38 @@ def fetch(out_dir: Path) -> None:
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    max_attempts = 5
+
     for name, expected_md5 in WANTED.items():
         dest = out_dir / name
         url = f"{ZENODO_API}/files/{name}/content"
 
-        for attempt in range(1, 6):
+        # One extra iteration past max_attempts so the final state is always
+        # verified before we either accept the file or give up. Verifying at the
+        # top of the loop also means an already-complete file costs one hash and
+        # no network at all.
+        for attempt in range(1, max_attempts + 2):
             if dest.exists():
                 print(f"[{name}] verifying {dest.stat().st_size:,} bytes ...", flush=True)
                 if md5_of(dest) == expected_md5:
                     print(f"[{name}] MD5 OK")
                     break
-                print(f"[{name}] MD5 mismatch, resuming download (attempt {attempt})")
-            # -C - resumes from wherever the local file stopped.
+                print(f"[{name}] MD5 mismatch ({dest.stat().st_size:,} bytes on disk)")
+
+            if attempt > max_attempts:
+                raise RuntimeError(
+                    f"{name}: gave up after {max_attempts} attempts; "
+                    f"no file matching MD5 {expected_md5}"
+                )
+
+            print(f"[{name}] downloading, attempt {attempt}/{max_attempts} ...", flush=True)
+            # -C - resumes from wherever the local file stopped, so a partial or
+            # truncated file continues rather than restarting from zero.
             subprocess.run(
                 ["curl", "-L", "--fail", "--retry", "5", "--retry-delay", "5",
                  "-C", "-", url, "-o", str(dest)],
                 check=False,
             )
-        else:
-            raise RuntimeError(f"{name}: could not obtain a file matching {expected_md5}")
 
 
 def load_annotations(ann_path: Path) -> tuple[dict, dict[int, str]]:
