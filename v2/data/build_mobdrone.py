@@ -46,6 +46,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
+
 ZENODO_RECORD = "5996890"
 ZENODO_API = f"https://zenodo.org/api/records/{ZENODO_RECORD}"
 
@@ -112,17 +114,9 @@ class ClipStats:
     # Max simultaneous instances of each class in any single frame of the clip.
     max_concurrent: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     total_boxes: int = 0
-
-    @property
-    def is_single_person(self) -> bool:
-        """True when the clip never shows more than one person and shows no other class.
-
-        These are the clips where an ideal tracker emits exactly one ID for the
-        whole sequence, which turns ID-switch counting into a direct measurement
-        rather than something requiring pseudo ground truth.
-        """
-        others = {k: v for k, v in self.max_concurrent.items() if k != "person"}
-        return self.max_concurrent.get("person", 0) == 1 and not any(others.values())
+    # Frames containing at least one person, used to reject clips where the
+    # person is only briefly visible and there is little track to follow.
+    person_frames: int = 0
 
 
 def parse_frame_name(name: str) -> FrameKey | None:
@@ -225,6 +219,8 @@ def summarize(coco: dict, cat_names: dict[int, str]) -> dict[str, ClipStats]:
         for ann in by_image.get(img["id"], []):
             per_class[cat_names[ann["category_id"]]] += 1
         st.total_boxes += sum(per_class.values())
+        if per_class.get("person", 0) > 0:
+            st.person_frames += 1
         for cname, n in per_class.items():
             st.max_concurrent[cname] = max(st.max_concurrent[cname], n)
 
@@ -261,11 +257,21 @@ def inspect(out_dir: Path) -> None:
         print(f"  {alt:>3}m  clips={len(sub):<4} frames={sum(c.n_frames for c in sub):>7,} "
               f"boxes={sum(c.total_boxes for c in sub):>7,}")
 
-    singles = sorted((c for c in clips.values() if c.is_single_person),
-                     key=lambda c: -c.n_frames)
-    print(f"\nsingle-person clips (unambiguous ID-switch measurement): {len(singles)}")
-    for c in singles[:15]:
-        print(f"  {c.clip:<34} {c.altitude_m:>3}m  {c.n_frames:>5} frames  split={c.split}")
+    chosen = select_tracking_clips(clips)
+    held = sum(clips[n].n_frames for n in chosen)
+    print(f"\ntracking clips (unambiguous ID-switch measurement): {len(chosen)}, "
+          f"{held:,} frames")
+    print(f"{'clip':<24} {'alt':>4} {'split':<6} {'frames':>7} {'person%':>8} other")
+    for n in chosen:
+        c = clips[n]
+        pct = 100 * c.person_frames / c.n_frames
+        other = sorted(k for k, v in c.max_concurrent.items() if k != "person" and v)
+        print(f"{n:<24} {c.altitude_m:>3}m {c.split:<6} {c.n_frames:>7,} "
+              f"{pct:>7.1f}% {other if other else ''}")
+    # These are held out of detection training, so the cost is worth stating.
+    train_total = sum(c.n_frames for c in clips.values() if c.split == "train")
+    print(f"\nholding these out leaves {train_total - held:,} of {train_total:,} "
+          f"train frames ({100 * (train_total - held) / train_total:.0f}%)")
 
     # The critical cross-check: do zip members line up with annotation clip names?
     zip_path = out_dir / "MOBDrone_videos.zip"
@@ -287,13 +293,247 @@ def inspect(out_dir: Path) -> None:
         print("\nvideo zip not present yet; run `fetch` first")
 
 
+def select_tracking_clips(
+    clips: dict[str, ClipStats],
+    *,
+    min_frames: int = 200,
+    min_person_fraction: float = 0.5,
+) -> list[str]:
+    """Pick clips where ID-switch counting is unambiguous.
+
+    A clip qualifies when it never shows more than one person, shows a person in
+    at least `min_person_fraction` of its frames, and is long enough to be worth
+    tracking through. On such a clip the correct output is exactly one person
+    track, so any additional person ID is an ID switch, measured with no pseudo
+    ground truth.
+
+    Other classes are deliberately tolerated. Trackers assign IDs per detection
+    regardless of class, and the evaluator filters output to the person class
+    before counting, so a boat in frame does not spoil the measurement. Requiring
+    "no other class present" shrinks the pool from 12 clips to 5 for no benefit.
+    """
+    chosen = []
+    for name, st in clips.items():
+        if st.max_concurrent.get("person", 0) != 1:
+            continue
+        if st.n_frames < min_frames:
+            continue
+        if st.person_frames < min_person_fraction * st.n_frames:
+            continue
+        chosen.append(name)
+    return sorted(chosen, key=lambda n: -clips[n].n_frames)
+
+
+def coco_to_yolo(bbox: list[float], img_w: int, img_h: int) -> tuple[float, ...] | None:
+    """Convert a COCO [x, y, w, h] box in pixels to YOLO normalized cx, cy, w, h.
+
+    Returns None for degenerate boxes, which would otherwise become NaN targets.
+    """
+    x, y, w, h = bbox
+    if w <= 0 or h <= 0:
+        return None
+    cx, cy = (x + w / 2) / img_w, (y + h / 2) / img_h
+    nw, nh = w / img_w, h / img_h
+    # Clamp rather than drop: a box may sit a pixel outside the frame edge.
+    cx, cy = min(max(cx, 0.0), 1.0), min(max(cy, 0.0), 1.0)
+    nw, nh = min(nw, 1.0), min(nh, 1.0)
+    return cx, cy, nw, nh
+
+
+def _video_for(clip: str, video_dir: Path) -> Path | None:
+    """Resolve a clip name to its video file, handling the one release typo.
+
+    Annotation clip `DJI_0915_0007_40m` corresponds to `DJI_0915_0007_40.mp4`;
+    the trailing "m" is missing from that single filename in the release.
+    """
+    direct = video_dir / f"{clip}.mp4"
+    if direct.exists():
+        return direct
+    if clip.endswith("m"):
+        alt = video_dir / f"{clip[:-1]}.mp4"
+        if alt.exists():
+            return alt
+    return None
+
+
+def _extract(video: Path, wanted: dict[int, str], out_img: Path,
+             jpeg_quality: int) -> tuple[int, int]:
+    """Decode `video` sequentially, writing the frames named in `wanted`.
+
+    Frames are read in order rather than sought. Seeking in H.264 snaps to the
+    nearest keyframe, so `cap.set(POS_FRAMES, i)` can silently return a different
+    frame than requested, which would mislabel data with no visible error. One
+    clip in the release also has an unreadable tail, so a failed read ends the
+    clip cleanly instead of aborting the build.
+    """
+    cap = cv2.VideoCapture(str(video))
+    last = max(wanted)
+    idx, written = 0, 0
+    while idx <= last:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        stem = wanted.get(idx)
+        if stem is not None:
+            cv2.imwrite(str(out_img / f"{stem}.jpg"), frame,
+                        [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            written += 1
+        idx += 1
+    cap.release()
+    return written, len(wanted) - written
+
+
+def build(out_dir: Path, stride: int, test_stride: int = 5,
+          jpeg_quality: int = 95) -> None:
+    """Build the YOLO detection dataset and the tracking-evaluation ground truth.
+
+    Three-way split, chosen so no stage contaminates another:
+
+      detection train  DJI_0915 clips, minus every tracking clip
+      detection test   DJI_0804 clips, the official held-out flight
+      tracking eval    the single-person DJI_0915 clips, held out of training
+
+    Every single-person clip lives in the train flight, so without holding them
+    out the tracker would be evaluated on footage its detector was trained on.
+
+    Frames are written at native 1920x1012 and never resized. Ultralytics
+    letterboxes once at train time, which keeps train and inference geometry
+    identical; the v1 Roboflow export instead stretched 16:9 into a square.
+    """
+    raw = out_dir
+    coco, cat_names = load_annotations(raw / "annotations_5_custom_classes.json")
+    clips = summarize(coco, cat_names)
+    video_dir = raw.parent / "videos" / "video_split_fullhd"
+    if not video_dir.is_dir():
+        raise SystemExit(f"expected extracted videos at {video_dir}")
+
+    track_clips = set(select_tracking_clips(clips))
+    print(f"tracking clips held out of training: {len(track_clips)}")
+
+    yolo_root = raw.parent / "yolo"
+    track_root = raw.parent / "tracking"
+    for split in ("train", "test"):
+        (yolo_root / "images" / split).mkdir(parents=True, exist_ok=True)
+        (yolo_root / "labels" / split).mkdir(parents=True, exist_ok=True)
+    (track_root / "gt").mkdir(parents=True, exist_ok=True)
+
+    by_image = defaultdict(list)
+    for ann in coco["annotations"]:
+        by_image[ann["image_id"]].append(ann)
+
+    # Group work per clip so each video is decoded exactly once.
+    per_clip: dict[str, list[dict]] = defaultdict(list)
+    for img in coco["images"]:
+        key = parse_frame_name(img["file_name"])
+        if key is not None:
+            per_clip[key.clip].append(img)
+
+    meta_rows = ["image,clip,altitude_m,split,n_boxes"]
+    track_rows = ["clip,altitude_m,video,n_frames,person_frames"]
+    totals = defaultdict(int)
+
+    for clip in sorted(per_clip):
+        video = _video_for(clip, video_dir)
+        if video is None:
+            print(f"  SKIP {clip}: no video")
+            continue
+        images = sorted(per_clip[clip], key=lambda i: parse_frame_name(i["file_name"]).frame_idx)
+        st = clips[clip]
+
+        if clip in track_clips:
+            # Tracking runs directly on the mp4, so no frames are extracted here;
+            # only per-frame person boxes are written. Extracting all 28k frames
+            # of these clips would cost ~11 GB for no gain.
+            lines = []
+            for img in images:
+                fidx = parse_frame_name(img["file_name"]).frame_idx
+                for ann in by_image.get(img["id"], []):
+                    if cat_names[ann["category_id"]] != "person":
+                        continue
+                    x, y, w, h = ann["bbox"]
+                    lines.append(f"{fidx},{x:.2f},{y:.2f},{w:.2f},{h:.2f}")
+            (track_root / "gt" / f"{clip}.txt").write_text("\n".join(lines) + "\n")
+            track_rows.append(f"{clip},{st.altitude_m},{video.name},"
+                              f"{st.n_frames},{st.person_frames}")
+            totals["track_clips"] += 1
+            totals["track_boxes"] += len(lines)
+            print(f"  TRACK {clip:<24} {st.n_frames:>6} frames  {len(lines):>6} person boxes")
+            continue
+
+        split = "test" if clip.startswith("DJI_0804") else "train"
+        # Adjacent 30fps frames are near-duplicates, so both splits are thinned.
+        # The test split is thinned less: it carries the per-altitude breakdown,
+        # and sparse buckets need every box they can get. The 10m bucket holds
+        # only 151 boxes dataset-wide, so it stays unthinned entirely; no stride
+        # can manufacture data that is not there.
+        clip_stride = stride if split == "train" else test_stride
+        if st.altitude_m == 10:
+            clip_stride = 1
+        keep = {}
+        for img in images:
+            fidx = parse_frame_name(img["file_name"]).frame_idx
+            if fidx % clip_stride:
+                continue
+            keep[fidx] = Path(img["file_name"]).stem
+
+        if not keep:
+            continue
+        written, missed = _extract(video, keep, yolo_root / "images" / split, jpeg_quality)
+
+        for img in images:
+            fidx = parse_frame_name(img["file_name"]).frame_idx
+            stem = keep.get(fidx)
+            if stem is None or not (yolo_root / "images" / split / f"{stem}.jpg").exists():
+                continue
+            rows = []
+            for ann in by_image.get(img["id"], []):
+                conv = coco_to_yolo(ann["bbox"], img["width"], img["height"])
+                if conv is None:
+                    continue
+                idx = CLASS_TO_IDX[cat_names[ann["category_id"]]]
+                rows.append(f"{idx} " + " ".join(f"{v:.6f}" for v in conv))
+            # An empty label file is meaningful: it marks a true background frame.
+            (yolo_root / "labels" / split / f"{stem}.txt").write_text("\n".join(rows) + "\n")
+            meta_rows.append(f"{stem},{clip},{st.altitude_m},{split},{len(rows)}")
+            totals[f"{split}_boxes"] += len(rows)
+
+        totals[f"{split}_images"] += written
+        note = f"  (missed {missed} undecodable)" if missed else ""
+        print(f"  {split.upper():<5} {clip:<24} {written:>5} frames{note}")
+
+    (yolo_root / "metadata.csv").write_text("\n".join(meta_rows) + "\n")
+    (track_root / "manifest.csv").write_text("\n".join(track_rows) + "\n")
+
+    names = "\n".join(f"  {i}: {n}" for i, n in enumerate(CLASSES))
+    (yolo_root / "mobdrone.yaml").write_text(
+        "# Generated by build_mobdrone.py. Frames are native 1920x1012 and are\n"
+        "# never pre-resized; ultralytics letterboxes at train time.\n"
+        f"path: {yolo_root.as_posix()}\n"
+        "train: images/train\n"
+        "val: images/test\n"
+        f"nc: {len(CLASSES)}\n"
+        f"names:\n{names}\n"
+    )
+
+    print("\n--- build summary ---")
+    for k in sorted(totals):
+        print(f"  {k:<16} {totals[k]:>8,}")
+    print(f"\n  dataset config : {yolo_root / 'mobdrone.yaml'}")
+    print(f"  tracking GT    : {track_root / 'gt'}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stage", choices=["fetch", "inspect", "build"])
     ap.add_argument("--out", type=Path, required=True, help="working data directory")
     ap.add_argument("--stride", type=int, default=10,
-                    help="keep every Nth frame for detection training (default 10)")
+                    help="keep every Nth frame for detection (default 10)")
+    ap.add_argument("--test-stride", type=int, default=5,
+                    help="stride for the test split; thinner than train because "
+                         "it carries the per-altitude breakdown (default 5)")
+    ap.add_argument("--jpeg-quality", type=int, default=95,
+                    help="JPEG quality; small objects suffer at low values")
     args = ap.parse_args()
 
     if args.stage == "fetch":
@@ -301,9 +541,8 @@ def main() -> None:
     elif args.stage == "inspect":
         inspect(args.out)
     else:
-        print("build: implemented once `inspect` confirms the clip-to-video mapping",
-              file=sys.stderr)
-        raise SystemExit(2)
+        build(args.out, stride=args.stride, test_stride=args.test_stride,
+              jpeg_quality=args.jpeg_quality)
 
 
 if __name__ == "__main__":
